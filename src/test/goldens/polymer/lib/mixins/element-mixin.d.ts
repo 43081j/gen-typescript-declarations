@@ -19,6 +19,7 @@
 
 declare namespace Polymer {
 
+
   /**
    * Element class mixin that provides the core API for Polymer's meta-programming
    * features including template stamping, data-binding, attribute deserialization,
@@ -75,93 +76,148 @@ declare namespace Polymer {
    *   `observedAttributes` implementation will automatically return an array
    *   of dash-cased attributes based on `properties`)
    */
-  function ElementMixin<T extends new(...args: any[]) => {}>(base: T): {
-    new(...args: any[]): ElementMixin & Polymer.PropertyEffects & Polymer.PropertiesMixin
-  } & T
+  function ElementMixin<T extends new (...args: any[]) => {}>(base: T): T & ElementMixin.Constructor & Polymer.PropertyEffects.Constructor & Polymer.PropertiesMixin.Constructor;
 
-  interface ElementMixin {
-    _template: HTMLTemplateElement|null;
-    _importPath: string;
-    rootPath: string;
-    importPath: string;
-    root: StampedTemplate|HTMLElement|ShadowRoot|null;
-    $: any;
+  namespace ElementMixin {
 
-    /**
-     * Stamps the element template.
-     */
-    ready(): any;
+    interface Constructor {
+      new(...args: any[]): Interface;
 
-    /**
-     * Overrides the default `Polymer.PropertyAccessors` to ensure class
-     * metaprogramming related to property accessors and effects has
-     * completed (calls `finalize`).
-     *
-     * It also initializes any property defaults provided via `value` in
-     * `properties` metadata.
-     */
-    _initializeProperties(): any;
+      /**
+       * Overrides `PropertyAccessors` to add map of dynamic functions on
+       * template info, for consumption by `PropertyEffects` template binding
+       * code. This map determines which method templates should have accessors
+       * created for them.
+       */
+      _parseTemplateContent(template: any, templateInfo: any, nodeInfo: any): any;
 
-    /**
-     * Implements `PropertyEffects`'s `_readyClients` call. Attaches
-     * element dom by calling `_attachDom` with the dom stamped from the
-     * element's template via `_stampTemplate`. Note that this allows
-     * client dom to be attached to the element prior to any observers
-     * running.
-     */
-    _readyClients(): any;
+      /**
+       * Override of PropertiesChanged createProperties to create accessors
+       * and property effects for all of the properties.
+       */
+      createProperties(props: any): void;
 
-    /**
-     * Provides a default implementation of the standard Custom Elements
-     * `connectedCallback`.
-     *
-     * The default implementation enables the property effects system and
-     * flushes any pending properties, and updates shimmed CSS properties
-     * when using the ShadyCSS scoping/custom properties polyfill.
-     */
-    connectedCallback(): any;
+      /**
+       * Override of PropertiesMixin _finalizeClass to create observers and
+       * find the template.
+       */
+      _finalizeClass(): void;
 
-    /**
-     * Attaches an element's stamped dom to itself. By default,
-     * this method creates a `shadowRoot` and adds the dom to it.
-     * However, this method may be overridden to allow an element
-     * to put its dom in another location.
-     *
-     * @param dom to attach to the element.
-     * @returns node to which the dom has been attached.
-     */
-    _attachDom(dom: StampedTemplate|null): ShadowRoot|null;
+      /**
+       * Creates observers for the given `observers` array.
+       * Leverages `PropertyEffects` to create observers.
+       *
+       * @param observers Array of observer descriptors for
+       *   this class
+       * @param dynamicFns Object containing keys for any properties
+       *   that are functions and should trigger the effect when the function
+       *   reference is changed
+       */
+      createObservers(observers: object|null, dynamicFns: object|null): void;
 
-    /**
-     * When using the ShadyCSS scoping and custom property shim, causes all
-     * shimmed styles in this element (and its subtree) to be updated
-     * based on current custom property values.
-     *
-     * The optional parameter overrides inline custom property styles with an
-     * object of properties where the keys are CSS properties, and the values
-     * are strings.
-     *
-     * Example: `this.updateStyles({'--color': 'blue'})`
-     *
-     * These properties are retained unless a value of `null` is set.
-     *
-     * @param properties Bag of custom property key/values to
-     *   apply to this element.
-     */
-    updateStyles(properties?: object|null): void;
+      /**
+       * Gather style text for a style element in the template.
+       *
+       * @param cssText Text containing styling to process
+       * @param baseURI Base URI to rebase CSS paths against
+       * @returns The processed CSS text
+       */
+      _processStyleText(cssText: string, baseURI: string): string;
 
-    /**
-     * Rewrites a given URL relative to a base URL. The base URL defaults to
-     * the original location of the document containing the `dom-module` for
-     * this element. This method will return the same URL before and after
-     * bundling.
-     *
-     * @param url URL to resolve.
-     * @param base Optional base URL to resolve against, defaults
-     * to the element's `importPath`
-     * @returns Rewritten URL relative to base
-     */
-    resolveUrl(url: string, base?: string): string;
+      /**
+       * Configures an element `proto` to function with a given `template`.
+       * The element name `is` and extends `ext` must be specified for ShadyCSS
+       * style scoping.
+       *
+       * @param is Tag name (or type extension name) for this element
+       */
+      _finalizeTemplate(is: string): void;
+    }
+
+    interface Interface {
+      _template: HTMLTemplateElement|null;
+      _importPath: string;
+      rootPath: string;
+      importPath: string;
+      root: StampedTemplate|HTMLElement|ShadowRoot|null;
+      $: any;
+
+      /**
+       * Stamps the element template.
+       */
+      ready(): any;
+
+      /**
+       * Overrides the default `Polymer.PropertyAccessors` to ensure class
+       * metaprogramming related to property accessors and effects has
+       * completed (calls `finalize`).
+       *
+       * It also initializes any property defaults provided via `value` in
+       * `properties` metadata.
+       */
+      _initializeProperties(): any;
+
+      /**
+       * Implements `PropertyEffects`'s `_readyClients` call. Attaches
+       * element dom by calling `_attachDom` with the dom stamped from the
+       * element's template via `_stampTemplate`. Note that this allows
+       * client dom to be attached to the element prior to any observers
+       * running.
+       */
+      _readyClients(): any;
+
+      /**
+       * Provides a default implementation of the standard Custom Elements
+       * `connectedCallback`.
+       *
+       * The default implementation enables the property effects system and
+       * flushes any pending properties, and updates shimmed CSS properties
+       * when using the ShadyCSS scoping/custom properties polyfill.
+       */
+      connectedCallback(): any;
+
+      /**
+       * Attaches an element's stamped dom to itself. By default,
+       * this method creates a `shadowRoot` and adds the dom to it.
+       * However, this method may be overridden to allow an element
+       * to put its dom in another location.
+       *
+       * @param dom to attach to the element.
+       * @returns node to which the dom has been attached.
+       */
+      _attachDom(dom: StampedTemplate|null): ShadowRoot|null;
+
+      /**
+       * When using the ShadyCSS scoping and custom property shim, causes all
+       * shimmed styles in this element (and its subtree) to be updated
+       * based on current custom property values.
+       *
+       * The optional parameter overrides inline custom property styles with an
+       * object of properties where the keys are CSS properties, and the values
+       * are strings.
+       *
+       * Example: `this.updateStyles({'--color': 'blue'})`
+       *
+       * These properties are retained unless a value of `null` is set.
+       *
+       * @param properties Bag of custom property key/values to
+       *   apply to this element.
+       */
+      updateStyles(properties?: object|null): void;
+
+      /**
+       * Rewrites a given URL relative to a base URL. The base URL defaults to
+       * the original location of the document containing the `dom-module` for
+       * this element. This method will return the same URL before and after
+       * bundling.
+       *
+       * @param url URL to resolve.
+       * @param base Optional base URL to resolve against, defaults
+       * to the element's `importPath`
+       * @returns Rewritten URL relative to base
+       */
+      resolveUrl(url: string, base?: string): string;
+    }
   }
 
   /**

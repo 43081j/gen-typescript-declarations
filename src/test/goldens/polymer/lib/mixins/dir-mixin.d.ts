@@ -12,6 +12,7 @@
 
 declare namespace Polymer {
 
+
   /**
    * Element class mixin that allows elements to use the `:dir` CSS Selector to have
    * text direction specific styling.
@@ -28,13 +29,27 @@ declare namespace Polymer {
    * - Changing `dir` at runtime is supported.
    * - Opting out of the global direction styling is permanent
    */
-  function DirMixin<T extends new(...args: any[]) => {}>(base: T): {
-    new(...args: any[]): DirMixin & Polymer.PropertyAccessors
-  } & T
+  function DirMixin<T extends new (...args: any[]) => {}>(base: T): T & DirMixin.Constructor & Polymer.PropertyAccessors.Constructor;
 
-  interface DirMixin {
-    ready(): any;
-    connectedCallback(): any;
-    disconnectedCallback(): any;
+  namespace DirMixin {
+
+    interface Constructor {
+      new(...args: any[]): Interface;
+      _processStyleText(cssText: any, baseURI: any): any;
+
+      /**
+       * Replace `:dir` in the given CSS text
+       *
+       * @param text CSS text to replace DIR
+       * @returns Modified CSS
+       */
+      _replaceDirInCssText(text: string): string;
+    }
+
+    interface Interface {
+      ready(): any;
+      connectedCallback(): any;
+      disconnectedCallback(): any;
+    }
   }
 }

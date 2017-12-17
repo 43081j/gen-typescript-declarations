@@ -14,6 +14,7 @@
 
 declare namespace Polymer {
 
+
   /**
    * Mixin that provides a minimal starting point to using the PropertiesChanged
    * mixin by providing a mechanism to declare properties in a static
@@ -25,28 +26,57 @@ declare namespace Polymer {
    * way makes sense. This can be done in reaction to properties changing by
    * implementing `_propertiesChanged`.
    */
-  function PropertiesMixin<T extends new(...args: any[]) => {}>(base: T): {
-    new(...args: any[]): PropertiesMixin & Polymer.PropertiesChanged
-  } & T
+  function PropertiesMixin<T extends new (...args: any[]) => {}>(base: T): T & PropertiesMixin.Constructor & Polymer.PropertiesChanged.Constructor;
 
-  interface PropertiesMixin {
+  namespace PropertiesMixin {
 
-    /**
-     * Overrides `PropertiesChanged` method and adds a call to
-     * `finalize` which lazily configures the element's property accessors.
-     */
-    _initializeProperties(): any;
+    interface Constructor {
+      new(...args: any[]): Interface;
 
-    /**
-     * Called when the element is added to a document.
-     * Calls `_enableProperties` to turn on property system from
-     * `PropertiesChanged`.
-     */
-    connectedCallback(): any;
+      /**
+       * Overrides `PropertiesChanged` method to return type specified in the
+       * static `properties` object for the given property.
+       *
+       * @param name Name of property
+       * @returns Type to which to deserialize attribute
+       */
+      typeForProperty(name: string): any;
 
-    /**
-     * Called when the element is removed from a document
-     */
-    disconnectedCallback(): any;
+      /**
+       * Finalizes an element definition, including ensuring any super classes
+       * are also finalized. This includes ensuring property
+       * accessors exist on the element prototype. This method calls
+       * `_finalizeClass` to finalize each constructor in the prototype chain.
+       */
+      finalize(): any;
+
+      /**
+       * Finalize an element class. This includes ensuring property
+       * accessors exist on the element prototype. This method is called by
+       * `finalize` and finalizes the class constructor.
+       */
+      _finalizeClass(): any;
+    }
+
+    interface Interface {
+
+      /**
+       * Overrides `PropertiesChanged` method and adds a call to
+       * `finalize` which lazily configures the element's property accessors.
+       */
+      _initializeProperties(): any;
+
+      /**
+       * Called when the element is added to a document.
+       * Calls `_enableProperties` to turn on property system from
+       * `PropertiesChanged`.
+       */
+      connectedCallback(): any;
+
+      /**
+       * Called when the element is removed from a document
+       */
+      disconnectedCallback(): any;
+    }
   }
 }

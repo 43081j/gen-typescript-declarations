@@ -14,6 +14,7 @@
 
 declare namespace Polymer {
 
+
   /**
    * Element class mixin that provides API for adding Polymer's cross-platform
    * gesture events to nodes.
@@ -23,12 +24,17 @@ declare namespace Polymer {
    * templates will support gesture events when this mixin is applied along with
    * `Polymer.TemplateStamp`.
    */
-  function GestureEventListeners<T extends new(...args: any[]) => {}>(base: T): {
-    new(...args: any[]): GestureEventListeners
-  } & T
+  function GestureEventListeners<T extends new (...args: any[]) => {}>(base: T): T & GestureEventListeners.Constructor;
 
-  interface GestureEventListeners {
-    _addEventListenerToNode(node: any, eventName: any, handler: any): any;
-    _removeEventListenerFromNode(node: any, eventName: any, handler: any): any;
+  namespace GestureEventListeners {
+
+    interface Constructor {
+      new(...args: any[]): Interface;
+    }
+
+    interface Interface {
+      _addEventListenerToNode(node: any, eventName: any, handler: any): any;
+      _removeEventListenerFromNode(node: any, eventName: any, handler: any): any;
+    }
   }
 }
