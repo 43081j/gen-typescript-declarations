@@ -61,11 +61,25 @@ export async function generateDeclarations(
   });
   const analysis = await a.analyzePackage();
   const outFiles = new Map<string, string>();
-  for (const tsDoc of analyzerToAst(analysis, config, rootDir)) {
+  const warningPrinter = new analyzer.WarningPrinter(process.stderr);
+  const {tsDocs, warnings} = analyzerToAst(analysis, config, rootDir);
+  for (const tsDoc of tsDocs) {
     outFiles.set(tsDoc.path, tsDoc.serialize())
   }
+  await warningPrinter.printWarnings(warnings);
   return outFiles;
 }
+
+/**
+ * TODO
+function logError(message: string, feature: analyzer.Feature) {
+  const filename =
+      feature.sourceRange && feature.sourceRange.file || 'unknown file';
+  const position = feature.sourceRange &&
+      feature.sourceRange.start.console.error(
+          `${filename}@${position}: ${message}`);
+}
+ */
 
 /**
  * Make TypeScript declaration documents from the given Polymer Analyzer
@@ -73,13 +87,14 @@ export async function generateDeclarations(
  */
 function analyzerToAst(
     analysis: analyzer.Analysis, config: Config, rootDir: string):
-    ts.Document[] {
+    {tsDocs: ts.Document[], warnings: analyzer.Warning[]} {
   const exclude = (config.exclude || ['test/**', 'demo/**'])
                       .map((p) => new minimatch.Minimatch(p));
   const addReferences = config.addReferences || {};
   const removeReferencesResolved = new Set(
       (config.removeReferences || []).map((r) => path.resolve(rootDir, r)));
   const renameTypes = new Map(Object.entries(config.renameTypes || {}));
+  const warnings: analyzer.Warning[] = [];
 
   // Analyzer can produce multiple JS documents with the same URL (e.g. an
   // HTML file with multiple inline scripts). We also might have multiple
@@ -108,7 +123,9 @@ function analyzerToAst(
       header: makeHeader(analyzerDocs.map((d) => d.url)),
     });
     for (const analyzerDoc of analyzerDocs) {
-      handleDocument(analyzerDoc, tsDoc);
+      const generator = new Generator(analyzerDoc, tsDoc);
+      generator.handleDocument();
+      warnings.push(...generator.warnings);
     }
     for (const ref of tsDoc.referencePaths) {
       const resolvedRef = path.resolve(rootDir, path.dirname(tsDoc.path), ref);
@@ -133,7 +150,7 @@ function analyzerToAst(
     // files than to try and prune the references (especially across packages).
     tsDocs.push(tsDoc);
   }
-  return tsDocs;
+  return {tsDocs, warnings};
 }
 
 /**
@@ -162,330 +179,398 @@ interface MaybePrivate {
   privacy?: 'public'|'private'|'protected'
 }
 
-/**
- * Extend the given TypeScript declarations document with all of the relevant
- * items in the given Polymer Analyzer document.
- */
-function handleDocument(doc: analyzer.Document, root: ts.Document) {
-  for (const feature of doc.getFeatures()) {
-    if ((feature as MaybePrivate).privacy === 'private') {
-      continue;
-    }
-    if (feature.kinds.has('element')) {
-      handleElement(feature as analyzer.Element, root);
-    } else if (feature.kinds.has('behavior')) {
-      handleBehavior(feature as analyzer.PolymerBehavior, root);
-    } else if (feature.kinds.has('element-mixin')) {
-      handleMixin(feature as analyzer.ElementMixin, root);
-    } else if (feature.kinds.has('class')) {
-      handleClass(feature as analyzer.Class, root);
-    } else if (feature.kinds.has('function')) {
-      handleFunction(feature as AnalyzerFunction, root);
-    } else if (feature.kinds.has('namespace')) {
-      handleNamespace(feature as analyzer.Namespace, root);
-    } else if (feature.kinds.has('import')) {
-      // Sometimes an Analyzer document includes an import feature that is
-      // inbound (things that depend on me) instead of outbound (things I
-      // depend on). For example, if an HTML file has a <script> tag for a JS
-      // file, then the JS file's Analyzer document will include that <script>
-      // tag as an import feature. We only care about outbound dependencies,
-      // hence this check.
-      if (feature.sourceRange && feature.sourceRange.file === doc.url) {
-        handleImport(feature as analyzer.Import, root);
-      }
-    }
-  }
-}
+class Generator {
+  private analyzerDoc: analyzer.Document;
+  private tsDoc: ts.Document;
+  warnings: analyzer.Warning[] = [];
 
-/**
- * Add the given Element to the given TypeScript declarations document.
- */
-function handleElement(feature: analyzer.Element, root: ts.Document) {
-  // Whether this element has a constructor that is assigned and can be called.
-  // If it does we'll emit a class, otherwise an interface.
-  let constructable;
-
-  let fullName;   // Fully qualified reference, e.g. `Polymer.DomModule`.
-  let shortName;  // Just the last part of the name, e.g. `DomModule`.
-  let parent;     // Where in the namespace tree does this live.
-
-  if (feature.className) {
-    constructable = true;
-    let namespacePath;
-    [namespacePath, shortName] = splitReference(feature.className);
-    fullName = feature.className;
-    parent = findOrCreateNamespace(root, namespacePath);
-
-  } else if (feature.tagName) {
-    constructable = false;
-    shortName = kebabToCamel(feature.tagName);
-    fullName = shortName;
-    // We're going to pollute the global scope with an interface.
-    parent = root;
-
-  } else {
-    console.error('Could not find a name.');
-    return;
+  constructor(analyzerDoc: analyzer.Document, tsDoc: ts.Document) {
+    this.analyzerDoc = analyzerDoc;
+    this.tsDoc = tsDoc;
   }
 
-  if (constructable) {
-    // TODO How do we handle behaviors with classes?
-    const c = new ts.Class({
-      name: shortName,
-      description: feature.description || feature.summary,
-      extends: (feature.extends) ||
-          (isPolymerElement(feature) ? 'Polymer.Element' : 'HTMLElement'),
-      mixins: feature.mixins.map((mixin) => mixin.identifier),
-      properties: handleProperties(feature.properties.values()),
-      methods: [
-        ...handleMethods(feature.staticMethods.values(), true),
-        ...handleMethods(feature.methods.values()),
-      ]
-    });
-    parent.members.push(c);
-
-  } else {
-    // TODO How do we handle mixins when we are emitting an interface? We don't
-    // currently define interfaces for mixins, so we can't just add them to
-    // extends.
-    const i = new ts.Interface({
-      name: shortName,
-      description: feature.description || feature.summary,
-      properties: handleProperties(feature.properties.values()),
-      // Don't worry about about static methods when we're not constructable.
-      // Since there's no handle to the constructor, they could never be
-      // called.
-      methods: handleMethods(feature.methods.values()),
-    });
-
-    if (isPolymerElement(feature)) {
-      i.extends.push('Polymer.Element');
-      i.extends.push(...feature.behaviorAssignments.map(
-          (behavior) => behavior.name));
-    }
-
-    parent.members.push(i);
-  }
-
-  // The `HTMLElementTagNameMap` global interface maps custom element tag names
-  // to their definitions, so that TypeScript knows that e.g.
-  // `dom.createElement('my-foo')` returns a `MyFoo`. Augment the map with this
-  // custom element.
-  if (feature.tagName) {
-    const elementMap = findOrCreateInterface(root, 'HTMLElementTagNameMap');
-    elementMap.properties.push(new ts.Property({
-      name: feature.tagName,
-      type: new ts.NameType(fullName),
+  warn(message: string, code: string, feature: analyzer.Feature) {
+    this.warnings.push(new analyzer.Warning({
+      message,
+      sourceRange: feature.sourceRange!,  // TODO
+      severity: analyzer.Severity.WARNING,
+      code,
+      parsedDocument: this.analyzerDoc.parsedDocument,
     }));
   }
-}
 
-/**
- * Add the given Polymer Behavior to the given TypeScript declarations
- * document.
- */
-function handleBehavior(feature: analyzer.PolymerBehavior, root: ts.Document) {
-  if (!feature.className) {
-    console.error('Could not find a name for behavior.');
-    return;
-  }
-  const [namespacePath, className] = splitReference(feature.className);
-  const i = new ts.Interface({name: className});
-  i.description = feature.description || feature.summary;
-  i.properties = handleProperties(feature.properties.values());
-  i.methods = handleMethods(feature.methods.values());
-  findOrCreateNamespace(root, namespacePath).members.push(i);
-}
-
-/**
- * Add the given Mixin to the given TypeScript declarations document.
- */
-function handleMixin(feature: analyzer.ElementMixin, root: ts.Document) {
-  const [namespacePath, mixinName] = splitReference(feature.name);
-  const parentNamespace = findOrCreateNamespace(root, namespacePath);
-
-  // The mixin function. It takes a constructor, and returns an intersection of
-  // 1) the given constructor, 2) the constructor for this mixin, 3) the
-  // constructors for any other mixins that this mixin also applies.
-  parentNamespace.members.push(new ts.Function({
-    name: mixinName,
-    description: feature.description,
-    templateTypes: ['T extends new (...args: any[]) => {}'],
-    params: [
-      new ts.Param({name: 'base', type: new ts.NameType('T')}),
-    ],
-    returns: new ts.IntersectionType([
-      new ts.NameType('T'),
-      new ts.NameType(mixinName + '.Constructor'),
-      ...feature.mixins.map(
-          (m) => new ts.NameType(m.identifier + '.Constructor'))
-    ]),
-  }));
-
-  // A namespace with the same name as the mixin function. Just a place to put
-  // the next two generated interfaces.
-  const mixinNamespace = new ts.Namespace({name: mixinName});
-  parentNamespace.members.push(mixinNamespace);
-
-  // The interface for a constructor of this mixin. Returns the instance
-  // interface (see below) when instantiated, and may also have methods of its
-  // own (static methods from the mixin class).
-  mixinNamespace.members.push(new ts.Interface({
-    name: 'Constructor',
-    methods: [
-      new ts.Method({
-        name: 'new',
-        params: [
-          new ts.Param({
-            name: 'args',
-            type: new ts.ArrayType(ts.anyType),
-            rest: true,
-          }),
-        ],
-        returns: new ts.NameType('Interface'),
-      }),
-      ...handleMethods(feature.staticMethods.values()),
-    ],
-  }));
-
-  // The interface for instances of this mixin.
-  mixinNamespace.members.push(
-      new ts.Interface({
-        name: 'Interface',
-        properties: handleProperties(feature.properties.values()),
-        methods: handleMethods(feature.methods.values()),
-      }),
-  );
-};
-
-/**
- * Add the given Class to the given TypeScript declarations document.
- */
-function handleClass(feature: analyzer.Class, root: ts.Document) {
-  if (!feature.className) {
-    console.error('Could not find a name for class.');
-    return;
-  }
-  const [namespacePath, name] = splitReference(feature.className);
-  const m = new ts.Class({name});
-  m.description = feature.description;
-  m.properties = handleProperties(feature.properties.values());
-  m.methods = [
-    ...handleMethods(feature.staticMethods.values(), true),
-    ...handleMethods(feature.methods.values())
-  ];
-  findOrCreateNamespace(root, namespacePath).members.push(m);
-}
-
-
-/**
- * Add the given Function to the given TypeScript declarations document.
- */
-function handleFunction(feature: AnalyzerFunction, root: ts.Document) {
-  const [namespacePath, name] = splitReference(feature.name);
-
-  const f = new ts.Function({
-    name,
-    description: feature.description || feature.summary,
-    templateTypes: feature.templateTypes,
-    returns: closureTypeToTypeScript(
-        feature.return && feature.return.type, feature.templateTypes),
-    returnsDescription: feature.return && feature.return.desc
-  });
-
-  for (const param of feature.params || []) {
-    // TODO Handle parameter default values. Requires support from Analyzer
-    // which only handles this for class method parameters currently.
-    const {type, optional, rest} =
-        closureParamToTypeScript(param.type, feature.templateTypes);
-    f.params.push(new ts.Param({name: param.name, type, optional, rest}));
-  }
-
-  findOrCreateNamespace(root, namespacePath).members.push(f);
-}
-
-/**
- * Convert the given Analyzer properties to their TypeScript declaration
- * equivalent.
- */
-function handleProperties(analyzerProperties: Iterable<analyzer.Property>):
-    ts.Property[] {
-  const tsProperties = <ts.Property[]>[];
-  for (const property of analyzerProperties) {
-    if (property.inheritedFrom || property.privacy === 'private') {
-      continue;
-    }
-    const p = new ts.Property({
-      name: property.name,
-      // TODO If this is a Polymer property with no default value, then the
-      // type should really be `<type>|undefined`.
-      type: closureTypeToTypeScript(property.type),
-    });
-    p.description = property.description || '';
-    tsProperties.push(p);
-  }
-  return tsProperties;
-}
-
-
-/**
- * Convert the given Analyzer methods to their TypeScript declaration
- * equivalent.
- */
-function handleMethods(
-    analyzerMethods: Iterable<analyzer.Method>, isStatic = false): ts.Method[] {
-  const tsMethods = <ts.Method[]>[];
-  for (const method of analyzerMethods) {
-    if (method.inheritedFrom || method.privacy === 'private') {
-      continue;
-    }
-    const m = new ts.Method({
-      name: method.name,
-      returns: closureTypeToTypeScript(method.return && method.return.type),
-      returnsDescription: method.return && method.return.desc,
-      isStatic
-    });
-    m.description = method.description || '';
-
-    let requiredAhead = false;
-    for (const param of reverseIter(method.params || [])) {
-      let {type, optional, rest} = closureParamToTypeScript(param.type);
-
-      if (param.defaultValue !== undefined) {
-        // Parameters with default values generally behave like optional
-        // parameters. However, unlike optional parameters, they may be
-        // followed by a required parameter, in which case the default value is
-        // set by explicitly passing undefined.
-        if (!requiredAhead) {
-          optional = true;
-        } else {
-          type = new ts.UnionType([type, ts.undefinedType]);
+  /**
+   * Extend the given TypeScript declarations document with all of the relevant
+   * items in the given Polymer Analyzer document.
+   */
+  handleDocument() {
+    for (const feature of this.analyzerDoc.getFeatures()) {
+      if ((feature as MaybePrivate).privacy === 'private') {
+        continue;
+      }
+      if (feature.kinds.has('element')) {
+        this.handleElement(feature as analyzer.Element);
+      } else if (feature.kinds.has('behavior')) {
+        this.handleBehavior(feature as analyzer.PolymerBehavior);
+      } else if (feature.kinds.has('element-mixin')) {
+        this.handleMixin(feature as analyzer.ElementMixin);
+      } else if (feature.kinds.has('class')) {
+        this.handleClass(feature as analyzer.Class);
+      } else if (feature.kinds.has('function')) {
+        this.handleFunction(feature as AnalyzerFunction);
+      } else if (feature.kinds.has('namespace')) {
+        this.handleNamespace(feature as analyzer.Namespace);
+      } else if (feature.kinds.has('import')) {
+        // Sometimes an Analyzer document includes an import feature that is
+        // inbound (things that depend on me) instead of outbound (things I
+        // depend on). For example, if an HTML file has a <script> tag for a JS
+        // file, then the JS file's Analyzer document will include that <script>
+        // tag as an import feature. We only care about outbound dependencies,
+        // hence this check.
+        if (feature.sourceRange &&
+            feature.sourceRange.file === this.analyzerDoc.url) {
+          this.handleImport(feature as analyzer.Import);
         }
-      } else if (!optional) {
-        requiredAhead = true;
+      }
+    }
+  }
+
+  /**
+   * Add the given Element to the given TypeScript declarations document.
+   */
+  handleElement(feature: analyzer.Element) {
+    // Whether this element has a constructor that is assigned and can be
+    // called. If it does we'll emit a class, otherwise an interface.
+    let constructable;
+
+    let fullName;   // Fully qualified reference, e.g. `Polymer.DomModule`.
+    let shortName;  // Just the last part of the name, e.g. `DomModule`.
+    let parent;     // Where in the namespace tree does this live.
+
+    if (feature.className) {
+      constructable = true;
+      let namespacePath;
+      [namespacePath, shortName] = splitReference(feature.className);
+      fullName = feature.className;
+      parent = findOrCreateNamespace(this.tsDoc, namespacePath);
+
+    } else if (feature.tagName) {
+      constructable = false;
+      shortName = kebabToCamel(feature.tagName);
+      fullName = shortName;
+      // We're going to pollute the global scope with an interface.
+      parent = this.tsDoc;
+
+    } else {
+      this.warn(
+          'Could not find a name for element.', 'ts-element-no-name', feature);
+      return;
+    }
+
+    if (constructable) {
+      // TODO How do we handle behaviors with classes?
+      const c = new ts.Class({
+        name: shortName,
+        description: feature.description || feature.summary,
+        extends: (feature.extends) ||
+            (isPolymerElement(feature) ? 'Polymer.Element' : 'HTMLElement'),
+        mixins: feature.mixins.map((mixin) => mixin.identifier),
+        properties: this.handleProperties(feature.properties.values()),
+        methods: [
+          ...this.handleMethods(feature.staticMethods.values(), true),
+          ...this.handleMethods(feature.methods.values()),
+        ]
+      });
+      parent.members.push(c);
+
+    } else {
+      // TODO How do we handle mixins when we are emitting an interface? We
+      // don't currently define interfaces for mixins, so we can't just add them
+      // to extends.
+      const i = new ts.Interface({
+        name: shortName,
+        description: feature.description || feature.summary,
+        properties: this.handleProperties(feature.properties.values()),
+        // Don't worry about about static methods when we're not constructable.
+        // Since there's no handle to the constructor, they could never be
+        // called.
+        methods: this.handleMethods(feature.methods.values()),
+      });
+
+      if (isPolymerElement(feature)) {
+        i.extends.push('Polymer.Element');
+        i.extends.push(...feature.behaviorAssignments.map(
+            (behavior) => behavior.name));
       }
 
-      // Analyzer might know this is a rest parameter even if there was no
-      // JSDoc type annotation (or if it was wrong).
-      rest = rest || !!param.rest;
-      if (rest && type.kind !== 'array') {
-        // Closure rest parameter types are written without the Array syntax,
-        // but in TypeScript they must be explicitly arrays.
-        type = new ts.ArrayType(type);
-      }
+      parent.members.push(i);
+    }
 
-      m.params.unshift(new ts.Param({
-        name: param.name,
-        description: param.description,
-        type,
-        optional,
-        rest
+    // The `HTMLElementTagNameMap` global interface maps custom element tag
+    // names to their definitions, so that TypeScript knows that e.g.
+    // `dom.createElement('my-foo')` returns a `MyFoo`. Augment the map with
+    // this custom element.
+    if (feature.tagName) {
+      const elementMap =
+          findOrCreateInterface(this.tsDoc, 'HTMLElementTagNameMap');
+      elementMap.properties.push(new ts.Property({
+        name: feature.tagName,
+        type: new ts.NameType(fullName),
       }));
     }
-
-    tsMethods.push(m);
   }
-  return tsMethods;
+
+  /**
+   * Add the given Polymer Behavior to the given TypeScript declarations
+   * document.
+   */
+  handleBehavior(feature: analyzer.PolymerBehavior) {
+    if (!feature.className) {
+      this.warn(
+          'Could not find a name for behavior.',
+          'ts-behavior-no-name',
+          feature);
+      return;
+    }
+    const [namespacePath, className] = splitReference(feature.className);
+    const i = new ts.Interface({name: className});
+    i.description = feature.description || feature.summary;
+    i.properties = this.handleProperties(feature.properties.values());
+    i.methods = this.handleMethods(feature.methods.values());
+    findOrCreateNamespace(this.tsDoc, namespacePath).members.push(i);
+  }
+
+  /**
+   * Add the given Mixin to the given TypeScript declarations document.
+   */
+  handleMixin(feature: analyzer.ElementMixin) {
+    const [namespacePath, mixinName] = splitReference(feature.name);
+    const parentNamespace = findOrCreateNamespace(this.tsDoc, namespacePath);
+
+    // The mixin function. It takes a constructor, and returns an intersection
+    // of 1) the given constructor, 2) the constructor for this mixin, 3) the
+    // constructors for any other mixins that this mixin also applies.
+    parentNamespace.members.push(new ts.Function({
+      name: mixinName,
+      description: feature.description,
+      templateTypes: ['T extends new (...args: any[]) => {}'],
+      params: [
+        new ts.Param({name: 'base', type: new ts.NameType('T')}),
+      ],
+      returns: new ts.IntersectionType([
+        new ts.NameType('T'),
+        new ts.NameType(mixinName + '.Constructor'),
+        ...feature.mixins.map(
+            (m) => new ts.NameType(m.identifier + '.Constructor'))
+      ]),
+    }));
+
+    // A namespace with the same name as the mixin function. Just a place to put
+    // the next two generated interfaces.
+    const mixinNamespace = new ts.Namespace({name: mixinName});
+    parentNamespace.members.push(mixinNamespace);
+
+    // The interface for a constructor of this mixin. Returns the instance
+    // interface (see below) when instantiated, and may also have methods of its
+    // own (static methods from the mixin class).
+    mixinNamespace.members.push(new ts.Interface({
+      name: 'Constructor',
+      methods: [
+        new ts.Method({
+          name: 'new',
+          params: [
+            new ts.Param({
+              name: 'args',
+              type: new ts.ArrayType(ts.anyType),
+              rest: true,
+            }),
+          ],
+          returns: new ts.NameType('Interface'),
+        }),
+        ...this.handleMethods(feature.staticMethods.values()),
+      ],
+    }));
+
+    // The interface for instances of this mixin.
+    mixinNamespace.members.push(
+        new ts.Interface({
+          name: 'Interface',
+          properties: this.handleProperties(feature.properties.values()),
+          methods: this.handleMethods(feature.methods.values()),
+        }),
+    );
+  };
+
+  /**
+   * Add the given Class to the given TypeScript declarations document.
+   */
+  handleClass(feature: analyzer.Class) {
+    if (!feature.className) {
+      this.warn(
+          'Could not find a name for class.', 'ts-class-no-name', feature);
+      return;
+    }
+    const [namespacePath, name] = splitReference(feature.className);
+    const m = new ts.Class({name});
+    m.description = feature.description;
+    m.properties = this.handleProperties(feature.properties.values());
+    m.methods = [
+      ...this.handleMethods(feature.staticMethods.values(), true),
+      ...this.handleMethods(feature.methods.values())
+    ];
+    findOrCreateNamespace(this.tsDoc, namespacePath).members.push(m);
+  }
+
+
+  /**
+   * Add the given Function to the given TypeScript declarations document.
+   */
+  handleFunction(feature: AnalyzerFunction) {
+    const [namespacePath, name] = splitReference(feature.name);
+
+    const f = new ts.Function({
+      name,
+      description: feature.description || feature.summary,
+      templateTypes: feature.templateTypes,
+      returns: closureTypeToTypeScript(
+          feature.return && feature.return.type, feature.templateTypes),
+      returnsDescription: feature.return && feature.return.desc
+    });
+
+    for (const param of feature.params || []) {
+      // TODO Handle parameter default values. Requires support from Analyzer
+      // which only handles this for class method parameters currently.
+      const {type, optional, rest} =
+          closureParamToTypeScript(param.type, feature.templateTypes);
+      f.params.push(new ts.Param({name: param.name, type, optional, rest}));
+    }
+
+    findOrCreateNamespace(this.tsDoc, namespacePath).members.push(f);
+  }
+
+  /**
+   * Convert the given Analyzer properties to their TypeScript declaration
+   * equivalent.
+   */
+  handleProperties(analyzerProperties: Iterable<analyzer.Property>):
+      ts.Property[] {
+    const tsProperties = <ts.Property[]>[];
+    for (const property of analyzerProperties) {
+      if (property.inheritedFrom || property.privacy === 'private') {
+        continue;
+      }
+      const p = new ts.Property({
+        name: property.name,
+        // TODO If this is a Polymer property with no default value, then the
+        // type should really be `<type>|undefined`.
+        type: closureTypeToTypeScript(property.type),
+      });
+      p.description = property.description || '';
+      tsProperties.push(p);
+    }
+    return tsProperties;
+  }
+
+
+  /**
+   * Convert the given Analyzer methods to their TypeScript declaration
+   * equivalent.
+   */
+  handleMethods(analyzerMethods: Iterable<analyzer.Method>, isStatic = false):
+      ts.Method[] {
+    const tsMethods = <ts.Method[]>[];
+    for (const method of analyzerMethods) {
+      if (method.inheritedFrom || method.privacy === 'private') {
+        continue;
+      }
+      const m = new ts.Method({
+        name: method.name,
+        returns: closureTypeToTypeScript(method.return && method.return.type),
+        returnsDescription: method.return && method.return.desc,
+        isStatic
+      });
+      m.description = method.description || '';
+
+      let requiredAhead = false;
+      for (const param of reverseIter(method.params || [])) {
+        let {type, optional, rest} = closureParamToTypeScript(param.type);
+
+        if (param.defaultValue !== undefined) {
+          // Parameters with default values generally behave like optional
+          // parameters. However, unlike optional parameters, they may be
+          // followed by a required parameter, in which case the default value
+          // is set by explicitly passing undefined.
+          if (!requiredAhead) {
+            optional = true;
+          } else {
+            type = new ts.UnionType([type, ts.undefinedType]);
+          }
+        } else if (!optional) {
+          requiredAhead = true;
+        }
+
+        // Analyzer might know this is a rest parameter even if there was no
+        // JSDoc type annotation (or if it was wrong).
+        rest = rest || !!param.rest;
+        if (rest && type.kind !== 'array') {
+          // Closure rest parameter types are written without the Array syntax,
+          // but in TypeScript they must be explicitly arrays.
+          type = new ts.ArrayType(type);
+        }
+
+        m.params.unshift(new ts.Param({
+          name: param.name,
+          description: param.description,
+          type,
+          optional,
+          rest
+        }));
+      }
+
+      tsMethods.push(m);
+    }
+    return tsMethods;
+  }
+
+  /**
+   * Add the given namespace to the given TypeScript declarations document.
+   */
+  handleNamespace(feature: analyzer.Namespace) {
+    const ns = findOrCreateNamespace(this.tsDoc, feature.name.split('.'));
+    if (ns.kind === 'namespace') {
+      ns.description = feature.description || feature.summary || '';
+    }
+  }
+
+  /**
+   * Add an HTML import to a TypeScript declarations file. For a given HTML
+   * import, we assume there is a corresponding declarations file that was
+   * generated by this same process.
+   *
+   * TODO If the import was to an external package, we currently don't know if
+   * the typings file actually exists. Also, if we end up placing type
+   * declarations in a types/ subdirectory, we will need to update these paths
+   * to match.
+   */
+  handleImport(feature: analyzer.Import) {
+    if (!feature.url) {
+      return;
+    }
+    // When we analyze a package's Git repo, our dependencies are installed to
+    // "<repo>/bower_components". However, when this package is itself installed
+    // as a dependency, our own dependencies will instead be siblings, one
+    // directory up the tree.
+    //
+    // Analyzer (since 2.5.0) will set an import feature's URL to the resolved
+    // dependency path as discovered on disk. An import for "../foo/foo.html"
+    // will be resolved to "bower_components/foo/foo.html". Transform the URL
+    // back to the style that will work when this package is installed as a
+    // dependency.
+    const url =
+        feature.url.replace(/^(bower_components|node_modules)\//, '../');
+    this.tsDoc.referencePaths.add(path.relative(
+        path.dirname(this.tsDoc.path), makeDeclarationsFilename(url)));
+  }
 }
 
 /**
@@ -497,44 +582,6 @@ function* reverseIter<T>(arr: T[]) {
   }
 }
 
-/**
- * Add the given namespace to the given TypeScript declarations document.
- */
-function handleNamespace(feature: analyzer.Namespace, tsDoc: ts.Document) {
-  const ns = findOrCreateNamespace(tsDoc, feature.name.split('.'));
-  if (ns.kind === 'namespace') {
-    ns.description = feature.description || feature.summary || '';
-  }
-}
-
-/**
- * Add an HTML import to a TypeScript declarations file. For a given HTML
- * import, we assume there is a corresponding declarations file that was
- * generated by this same process.
- *
- * TODO If the import was to an external package, we currently don't know if
- * the typings file actually exists. Also, if we end up placing type
- * declarations in a types/ subdirectory, we will need to update these paths to
- * match.
- */
-function handleImport(feature: analyzer.Import, tsDoc: ts.Document) {
-  if (!feature.url) {
-    return;
-  }
-  // When we analyze a package's Git repo, our dependencies are installed to
-  // "<repo>/bower_components". However, when this package is itself installed
-  // as a dependency, our own dependencies will instead be siblings, one
-  // directory up the tree.
-  //
-  // Analyzer (since 2.5.0) will set an import feature's URL to the resolved
-  // dependency path as discovered on disk. An import for "../foo/foo.html"
-  // will be resolved to "bower_components/foo/foo.html". Transform the URL
-  // back to the style that will work when this package is installed as a
-  // dependency.
-  const url = feature.url.replace(/^(bower_components|node_modules)\//, '../');
-  tsDoc.referencePaths.add(
-      path.relative(path.dirname(tsDoc.path), makeDeclarationsFilename(url)));
-}
 
 /**
  * Traverse the given node to find the namespace AST node with the given path.
