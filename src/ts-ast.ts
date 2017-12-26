@@ -56,6 +56,16 @@ export class Document {
     }
   }
 
+  * serialize2(): Iterable<string> {
+    if (this.header) {
+      yield formatComment(this.header, 0);
+    }
+    for (const ref of this.referencePaths) {
+      yield `/// <reference path="${ref}">`;
+    }
+    yield* this.members.map((m) => m.serialize());
+  }
+
   serialize(): string {
     let out = '';
     if (this.header) {
@@ -93,6 +103,27 @@ export class Namespace {
       yield* m.traverse();
     }
     yield this;
+  }
+
+  * serialize2(depth: number = 0): Iterable<string> {
+    if (this.description) {
+      yield formatComment(this.description, depth);
+    }
+
+    const i = indent(depth)
+
+    let header = i;
+    if (depth === 0) {
+      header += 'declare ';
+    }
+    header += `namespace ${this.name} {`;
+    yield header;
+
+    for (const member of this.members) {
+      yield member.serialize(depth + 1);
+    }
+
+    yield `${i}}`;
   }
 
   serialize(depth: number = 0): string {
@@ -147,6 +178,38 @@ export class Class {
       yield* m.traverse();
     }
     yield this;
+  }
+
+  * serialize2(depth: number = 0): Iterable<string> {
+    if (this.description) {
+      yield formatComment(this.description, depth);
+    }
+    const i = indent(depth);
+
+    let header = i;
+    if (depth === 0) {
+      header += 'declare ';
+    }
+    header += `class ${this.name}`;
+    if (this.mixins.length) {
+      const i2 = indent(depth + 1);
+      header += ' extends';
+      for (const mixin of this.mixins) {
+        header += `\n${i2}${mixin}(`;
+      }
+      header += `\n${i2}${this.extends || 'Object'}`;
+      header += ')'.repeat(this.mixins.length)
+
+    } else if (this.extends) {
+      header += ' extends ' + this.extends;
+    }
+    header += ' {';
+    yield header;
+
+    yield* this.properties.map((p) => p.serialize(depth + 1));
+    yield* this.methods.map((m) => m.serialize(depth + 1));
+
+    yield `${i}}`;
   }
 
   serialize(depth: number = 0): string {
@@ -244,6 +307,25 @@ export class Interface {
     }
     out += `${i}}\n`;
     return out;
+  }
+
+  * serialize2(depth: number = 0): Iterable<string> {
+    if (this.description) {
+      yield formatComment(this.description, depth);
+    }
+
+    const i = indent(depth);
+    let header = `interface ${this.name}`;
+    if (this.extends.length) {
+      header += ' extends ' + this.extends.join(', ');
+    }
+    header += ' {';
+    yield header;
+
+    yield* this.properties.map((p) => p.serialize(depth + 1));
+    yield* this.methods.map((m) => m.serialize(depth + 1));
+
+    yield `${i}}`;
   }
 }
 
@@ -421,9 +503,9 @@ export class UnionType {
     const flattened = [];
     for (const m of this.members) {
       if (m.kind === 'union') {
-        // Note we are not recursing here, because we assume we're being called
-        // via a depth-first walk, so any union members have already been
-        // simplified.
+        // Note we are not recursing here, because we assume we're being
+        // called via a depth-first walk, so any union members have already
+        // been simplified.
         flattened.push(...m.members);
       } else {
         flattened.push(m);
@@ -450,8 +532,8 @@ export class UnionType {
         deduped.push(m);
       }
     }
-    // Always put `null` and `undefined` at the end because it's more readable.
-    // Preserve declared order for everything else.
+    // Always put `null` and `undefined` at the end because it's more
+    // readable. Preserve declared order for everything else.
     if (hasNull) {
       deduped.push(nullType);
     }
